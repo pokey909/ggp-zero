@@ -78,14 +78,14 @@ class TrainingLoggerCb(keras.callbacks.Callback):
             strs = [fmt % (k, logs[k]) for k in names]
             return ", ".join(strs)
 
-        loss_names = "loss policy_loss score_loss".split()
-        val_loss_names = "val_loss val_policy_loss val_score_loss".split()
+        loss_names = "loss policy_0_loss policy_1_loss score_loss".split()
+        val_loss_names = "val_loss val_policy_0_loss val_policy_1_loss val_score_loss".split()
 
         log.info(str_by_name(loss_names, 4))
         log.info(str_by_name(val_loss_names, 4))
 
         # accuracy:
-        for output in "policy score".split():
+        for output in "policy_0 policy_1 score".split():
             acc = []
             val_acc = []
             for k in self.params['metrics']:
@@ -119,8 +119,8 @@ class EarlyStoppingCb(keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
         assert logs
         epoch += 1
-        policy_acc = logs['policy_acc']
-        val_policy_acc = logs['val_policy_acc']
+        policy_acc = logs['policy_0_acc']
+        val_policy_acc = logs['val_policy_0_acc']
 
         # store best weights as best val_policy_acc
         if val_policy_acc > self.best_val_policy_acc:
@@ -179,39 +179,42 @@ class NeuralNetwork(object):
         for l in lines:
             log.verbose(l)
 
-    def predict_n(self, states, lead_role_indexes):
+    def predict_n(self, states):
         num_states = len(states)
 
-        X_0 = [self.bases_config.state_to_channels(s, ri) for s, ri in zip(states,
-                                                                           lead_role_indexes)]
-
+        X_0 = [self.bases_config.state_to_channels(s) for s in states]
         X_0 = np.array(X_0)
+
         X_1 = np.array([self.bases_config.get_non_cord_input(s) for s in states])
 
         Y = self.keras_model.predict([X_0, X_1], batch_size=num_states)
-        assert len(Y) == 2
+        assert len(Y) == len(self.bases_config.policy_dist_counts) + 1
 
         result = []
         for i in range(num_states):
-            policy, scores = Y[0][i], Y[1][i]
-            result.append((policy, scores))
+            policy_dists = [Y[j][i] for j in range(len(self.bases_config.policy_dist_counts))]
+            final_score = Y[-1][i]
+            result.append(tuple(policy_dists + [final_score]))
 
         return result
 
-    def predict_1(self, state, lead_role_index):
-        return self.predict_n([state], [lead_role_index])[0]
+    def predict_1(self, state):
+        return self.predict_n([state])[0]
 
     def compile(self, alphazero_regularisation=False):
         if alphazero_regularisation:
             optimizer = SGD(lr=1e-2, momentum=0.9)
-            loss = [objective_function_for_policy, "mean_squared_error"]
+            loss = [objective_function_for_policy] * len(self.bases_config.policy_dist_counts)
+            loss.append("mean_squared_error")
         else:
-            loss = ['categorical_crossentropy', 'mean_squared_error']
+            loss = ['categorical_crossentropy'] * len(self.bases_config.policy_dist_counts)
+            loss.append("mean_squared_error")
             optimizer = "adam"
 
         # loss is much less on score.  it overfits really fast.
+        loss_weights = [1.0] * len(self.bases_config.policy_dist_counts) + [0.01]
         self.keras_model.compile(loss=loss, optimizer=optimizer,
-                                 loss_weights=[1.0, 0.01],
+                                 loss_weights=loss_weights,
                                  metrics=["acc", top_2_acc, top_3_acc])
 
     def train(self, conf):

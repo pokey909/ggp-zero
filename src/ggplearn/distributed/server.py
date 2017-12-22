@@ -27,14 +27,13 @@ def default_conf():
     conf = msgdefs.ServerConfig()
 
     conf.port = 9000
-    conf.game = "breakthrough"
-    conf.current_step = 1
+    conf.game = "reversi"
+    conf.current_step = 0
 
-    conf.score_network_size = "small"
-    conf.policy_network_size = "small"
+    conf.network_size = "tiny"
 
-    conf.generation_prefix = "v3_"
-    conf.store_path = os.path.join(os.environ["GGPLEARN_PATH"], "data", "breakthrough", "v3")
+    conf.generation_prefix = "v4_"
+    conf.store_path = os.path.join(os.environ["GGPLEARN_PATH"], "data", "reversi", "v4")
 
     # generation set on server
     conf.player_select_conf = msgdefs.PolicyPlayerConf(verbose=False,
@@ -43,7 +42,7 @@ def default_conf():
     conf.player_policy_conf = msgdefs.PUCTPlayerConf(name="policy_puct",
                                                      verbose=False,
                                                      playouts_per_iteration=800,
-                                                     playouts_per_iteration_noop=0,
+                                                     playouts_per_iteration_noop=1,
                                                      expand_root=100,
                                                      dirichlet_noise_alpha=-1,
                                                      cpuct_constant_first_4=3.0,
@@ -52,14 +51,20 @@ def default_conf():
 
     conf.player_score_conf = msgdefs.PolicyPlayerConf(verbose=False,
                                                       choose_exponential_scale=-1)
-    conf.generation_size = 32
+    conf.generation_size = 200
     conf.max_growth_while_training = 0.2
 
     conf.validation_split = 0.8
-    conf.batch_size = 32
+    conf.batch_size = 64
     conf.epochs = 4
     conf.max_sample_count = 100000
     conf.run_post_training_cmds = []
+
+    # if this is set will override conf.network_size
+    conf.network_size_progression = [(5, "tiny"), (10, "smaller"), (15, "small"), (20, "normal")]
+
+    # if this is set will override conf.player_policy_conf.playouts_per_iteration
+    conf.playouts_progression = [(5, 100), (10, 200), (15, 400), (20, 800)]
 
     return conf
 
@@ -126,28 +131,51 @@ class ServerBroker(Broker):
 
         self.networks_reqd_trained = 0
 
+        self.update_conf()
+
         self.check_nn_generations_exist()
         self.create_approx_config()
+
         self.save_our_config()
 
         # finally start listening on port
         reactor.listenTCP(conf.port, ServerFactory(self))
 
+    def next_network_size(self, steps):
+        next_size = self.conf.network_size
+        for next_step, network_size in self.conf.network_size_progression:
+            if steps < next_step:
+                next_size = network_size
+                break
+
+        return next_size
+
+    def update_conf(self):
+        self.conf.network_size = self.next_network_size(self.conf.current_step)
+
+        next_playouts = self.conf.player_policy_conf.playouts_per_iteration
+        for next_step, playouts in self.conf.playouts_progression:
+            if self.conf.current_step < next_step:
+                next_playouts = playouts
+                break
+
+        if self.conf.player_policy_conf.playouts_per_iteration != next_playouts:
+            msg = "changing player_policy_conf.playouts_per_iteration from %s to %s"
+            log.warning(msg % (self.conf.player_policy_conf.playouts_per_iteration, next_playouts))
+            self.conf.player_policy_conf.playouts_per_iteration = next_playouts
+
     def check_nn_generations_exist(self):
-        score_gen = self.get_score_generation(self.conf.current_step)
-        policy_gen = self.get_policy_generation(self.conf.current_step)
+        generation = self.get_generation(self.conf.current_step)
 
-        log.debug("current policy gen %s" % score_gen)
-        log.debug("current score gen %s" % policy_gen)
+        log.debug("current gen %s" % generation)
 
-        for g in (policy_gen, score_gen):
-            net = network.create(g, self.game_info, load=False)
-            if not net.can_load():
-                # will create a randon network
-                if self.conf.current_step == 0:
-                    net.save()
-                else:
-                    critical_error("Did not find network %s.  exiting." % g)
+        net = network.create(generation, self.game_info, load=False)
+        if not net.can_load():
+            # will create a randon network
+            if self.conf.current_step == 0:
+                net.save()
+            else:
+                critical_error("Did not find network %s.  exiting." % generation)
 
     def save_our_config(self, rolled=False):
         if os.path.exists(self.conf_filename):
@@ -159,18 +187,9 @@ class ServerBroker(Broker):
         with open(self.conf_filename, 'w') as open_file:
             open_file.write(attrutil.attr_to_json(self.conf, indent=4))
 
-    def get_master_by_ip(self):
-        ''' spin through self play workers, and gets the first worker for a new ip.  returns list '''
-        pass
-
-    def get_policy_generation(self, step):
+    def get_generation(self, step):
         return "%sgen_%s_%s" % (self.conf.generation_prefix,
-                                self.conf.policy_network_size,
-                                step)
-
-    def get_score_generation(self, step):
-        return "%sgen_%s_%s" % (self.conf.generation_prefix,
-                                self.conf.score_network_size,
+                                self.conf.network_size,
                                 step)
 
     def need_more_samples(self):
@@ -274,8 +293,10 @@ class ServerBroker(Broker):
 
         gen = msgdefs.Generation()
         gen.game = self.conf.game
-        gen.with_score_generation = self.get_score_generation(self.conf.current_step)
-        gen.with_policy_generation = self.get_policy_generation(self.conf.current_step)
+
+        # XXX need to fix this
+        gen.with_score_generation = self.get_generation(self.conf.current_step)
+        gen.with_policy_generation = self.get_generation(self.conf.current_step)
         gen.num_samples = self.conf.generation_size
         gen.samples = self.accumulated_samples[:self.conf.generation_size]
 
@@ -289,6 +310,9 @@ class ServerBroker(Broker):
             open_file.write(attrutil.attr_to_json(gen, indent=4))
 
         self.generation = gen
+        self.train_generation()
+
+    def train_generation(self):
         if self.the_nn_trainer is None:
             critical_error("There is no nn trainer to create network - exiting")
 
@@ -298,31 +322,34 @@ class ServerBroker(Broker):
         m.generation_prefix = self.conf.generation_prefix
         m.store_path = self.conf.store_path
 
-        m.use_previous = False  # until we are big enough, what is the point?
+        m.use_previous = self.conf.use_prev_network
 
         m.next_step = self.conf.current_step + 1
+
         m.validation_split = self.conf.validation_split
         m.batch_size = self.conf.batch_size
         m.epochs = self.conf.epochs
         m.max_sample_count = self.conf.max_sample_count
 
-        # send out message to train
-        if self.conf.policy_network_size != self.conf.score_network_size:
-            for network_size in (self.conf.policy_network_size, self.conf.score_network_size):
-                m.network_size = network_size
+        next_network_size = self.next_network_size(m.next_step)
+        if next_network_size != self.conf.network_size:
+            log.warning("Changing network size from %s -> %s" % (self.conf.network_size,
+                                                                 next_network_size))
 
-                self.the_nn_trainer.worker.send_msg(m)
-                log.info("sent to the_nn_trainer")
-                self.networks_reqd_trained += 1
-        else:
-            m.network_size = self.conf.policy_network_size
-            log.info("sent to the_nn_trainer")
-            self.the_nn_trainer.worker.send_msg(m)
-            self.networks_reqd_trained += 1
+        m.network_size = next_network_size
+
+        log.info("sent to the_nn_trainer")
+
+        # send out message to train
+        self.the_nn_trainer.worker.send_msg(m)
+
+        # when this reaches 0, will roll_generation()... etc
+        self.networks_reqd_trained += 1
 
     def roll_generation(self):
         # training is done
         self.conf.current_step += 1
+        self.update_conf()
         self.check_nn_generations_exist()
 
         # reconfigure player workers
@@ -348,12 +375,11 @@ class ServerBroker(Broker):
 
     def create_approx_config(self):
         # we use score_gen for select also XXX we should probably just go to one
-        policy_generation = self.get_policy_generation(self.conf.current_step)
-        score_generation = self.get_score_generation(self.conf.current_step)
+        generation = self.get_generation(self.conf.current_step)
 
-        self.conf.player_select_conf.generation = score_generation
-        self.conf.player_policy_conf.generation = policy_generation
-        self.conf.player_score_conf.generation = score_generation
+        self.conf.player_select_conf.generation = generation
+        self.conf.player_policy_conf.generation = generation
+        self.conf.player_score_conf.generation = generation
 
         conf = msgdefs.ConfigureApproxTrainer(game=self.conf.game)
         conf.player_select_conf = self.conf.player_select_conf

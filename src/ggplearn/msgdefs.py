@@ -61,8 +61,7 @@ class ServerConfig(object):
     game = attr.ib("breakthrough")
 
     current_step = attr.ib(0)
-    policy_network_size = attr.ib("small")
-    score_network_size = attr.ib("smaller")
+    network_size = attr.ib("small")
 
     generation_prefix = attr.ib("v2_")
     store_path = attr.ib("somewhere")
@@ -81,6 +80,11 @@ class ServerConfig(object):
 
     # run system commands after training (copy files to machines etc)
     run_post_training_cmds = attr.ib(default=attr.Factory(list))
+
+    use_prev_network = attr.ib(True)
+
+    network_size_progression = attr.ib(attr.Factory(list))
+    playouts_progression = attr.ib(attr.Factory(list))
 
 
 @attr.s
@@ -127,12 +131,11 @@ class Sample(object):
     state = attr.ib()
 
     # polict distribution
-    policy = attr.ib()
+    policies = attr.ib()
 
     final_score = attr.ib()
     depth = attr.ib()
     game_length = attr.ib()
-    lead_role_index = attr.ib()
 
 
 @attr.s

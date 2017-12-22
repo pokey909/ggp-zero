@@ -16,12 +16,12 @@ def check_sample(sample, game_model):
     assert len(sample.state) == len(game_model.bases)
     assert len(sample.final_score) == len(game_model.roles)
 
-    num_actions = sum(len(actions) for actions in game_model.actions)
-    for legal, p in sample.policy:
-        assert 0 <= legal < num_actions
-        assert -0.01 < p < 1.01
-
-    assert 0 <= sample.lead_role_index <= len(game_model.roles)
+    for ri in range(len(game_model.roles)):
+        num_actions = len(game_model.actions[ri])
+        policy = sample.policies[ri]
+        for legal, p in policy:
+            assert 0 <= legal < num_actions
+            assert -0.01 < p < 1.01
 
 
 class SamplesHolder(object):
@@ -32,9 +32,6 @@ class SamplesHolder(object):
         self.bases_config = bases_config
         self.train_samples = []
         self.validation_samples = []
-
-        self.policy_1_index_start = len(game_info.model.actions[0])
-        self.expected_policy_len = sum(len(actions) for actions in game_info.model.actions)
 
     def add(self, sample, validation=False):
         assert isinstance(sample, msgdefs.Sample)
@@ -51,13 +48,16 @@ class SamplesHolder(object):
         self.train_samples = self.train_samples[train_index:]
         self.validation_samples = self.validation_samples[validate_index:]
 
-    def policy_as_array(self, sample):
-        index_start = 0 if sample.lead_role_index == 0 else self.policy_1_index_start
-        policy_outputs = np.zeros(self.expected_policy_len)
-        for idx, prob in sample.policy:
-            policy_outputs[index_start + idx] = prob
+    def policies_as_arrays(self, sample):
+        policies = []
 
-        return policy_outputs
+        for ri, policy in enumerate(sample.policies):
+            expected_policy_len = len(self.game_info.model.actions[ri])
+            policy_output = np.zeros(expected_policy_len)
+            for legal, prob in policy:
+                policy_output[legal] = prob
+            policies.append(policy_output)
+        return policies
 
     def sample_to_nn_style(self, sample, data):
         check_sample(sample, self.game_info.model)
@@ -65,7 +65,7 @@ class SamplesHolder(object):
         # transform samples -> numpy arrays as inputs/outputs to nn
 
         # input 1
-        planes = self.bases_config.state_to_channels(sample.state, sample.lead_role_index)
+        planes = self.bases_config.state_to_channels(sample.state)
 
         # input - planes
         data[0].append(planes)
@@ -75,14 +75,17 @@ class SamplesHolder(object):
         data[1].append(non_planes)
 
         # output - policy
-        data[2].append(self.policy_as_array(sample))
+        x = self.policies_as_arrays(sample)
+        data[2].append(x[0])
+        data[3].append(x[1])
 
         # output - best/final scores
-        data[3].append(sample.final_score)
+        data[4].append(sample.final_score)
 
     def massage_data(self):
-        training_data = [[] for _ in range(4)]
-        validation_data = [[] for _ in range(4)]
+        # XXX this is horrible...
+        training_data = [[] for _ in range(5)]
+        validation_data = [[] for _ in range(5)]
 
         log.debug("massaging training samples: %s" % len(self.train_samples))
         for sample in self.train_samples:

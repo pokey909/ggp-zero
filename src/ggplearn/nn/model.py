@@ -109,15 +109,20 @@ def get_network_model(config, **kwds):
         layer = ResidualBlock(params.CNN_FILTERS_SIZE, 3)(layer)
 
     # number of roles + 1
-    res_policy_out = Conv2DBlock(config.role_count + 1, 1,
-                                 padding='valid', activation='relu', **reg_params)(layer)
+    res_policy_outs = []
+    for _ in range(config.role_count):
+        res_policy_out = Conv2DBlock(1, 1,
+                                     padding='valid', activation='relu', **reg_params)(layer)
+        res_policy_out = klayers.Flatten()(res_policy_out)
+
+        if params.DO_DROPOUT:
+            res_policy_out = klayers.Dropout(0.333)(res_policy_out)
+        res_policy_outs.append(res_policy_out)
 
     res_score_out = Conv2DBlock(2, 1, padding='valid', activation='relu', **reg_params)(layer)
-    res_policy_out = klayers.Flatten()(res_policy_out)
     res_score_out = klayers.Flatten()(res_score_out)
 
     if params.DO_DROPOUT:
-        res_policy_out = klayers.Dropout(0.333)(res_policy_out)
         res_score_out = klayers.Dropout(0.5)(res_score_out)
 
     # FC on other non-cord states
@@ -128,9 +133,16 @@ def get_network_model(config, **kwds):
 
     # output: policy
     ################
-    prelude_policy = klayers.concatenate([res_policy_out, nc_layer], axis=-1)
-    output_policy = klayers.Dense(config.policy_dist_count,
-                                  activation="softmax", name="policy", **reg_params)(prelude_policy)
+    output_policies = []
+    role_count = 0
+    for res_score_out, policy_dist_count in zip(res_policy_outs, config.policy_dist_counts):
+        prelude_policy = klayers.concatenate([res_policy_out, nc_layer], axis=-1)
+        dense = klayers.Dense(policy_dist_count,
+                              activation="softmax",
+                              name="policy_%s" % role_count,
+                              **reg_params)
+        output_policies.append(dense(prelude_policy))
+        role_count += 1
 
     # output: score
     ###############
@@ -142,5 +154,5 @@ def get_network_model(config, **kwds):
 
     # model
     #######
-    return models.Model(inputs=[inputs_board, inputs_other],
-                        outputs=[output_policy, output_score])
+    outputs = output_policies + [output_score]
+    return models.Model(inputs=[inputs_board, inputs_other], outputs=outputs)

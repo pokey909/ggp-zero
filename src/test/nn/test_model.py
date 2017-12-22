@@ -50,12 +50,11 @@ def test_net_create():
         sm = game_info.get_sm()
         basestate = sm.get_initial_state()
 
-        policy, scores = nn.predict_1(basestate.to_list(), 0)
-        print policy, scores
+        policy_0, policy_1, scores = nn.predict_1(basestate.to_list(), 0)
+        print policy_0, policy_1, scores
 
         res = nn.predict_n([basestate.to_list(), basestate.to_list()], [1, 0])
-        assert len(res) == 2 and len(res[0]) == 2 and len(res[1]) == 2
-        print policy, scores
+        assert len(res) == 2 and len(res[0]) == 3 and len(res[1]) == 3
 
 
 def test_net_sizes():

@@ -138,7 +138,7 @@ def test_fast_plays():
     conf.verbose = False
 
     # just checking that we haven't modified default
-    assert conf.verbose == False and default_puct_config.verbose == True
+    assert not conf.verbose and default_puct_config.verbose
 
     conf.playouts_per_iteration = 1
     conf.playouts_per_iteration_noop = 0
@@ -230,3 +230,37 @@ def test_choose_policy_random():
     print "white_score", gm.players_map["white"].name, acc_white_score
     print "black_score", gm.players_map["black"].name, acc_black_score
     print game_depths
+
+def test_noops_are_the_only_move():
+    gm = GameMaster(get_gdl_for_game("reversi"))
+
+    current_gen = "v3_gen_small_1"
+    conf = msgdefs.PUCTPlayerConf(generation=current_gen,
+                                  verbose=True,
+                                  playouts_per_iteration=42,
+                                  playouts_per_iteration_noop=1)
+
+    # add two players
+    gm.add_player(PUCTPlayer(conf), "black")
+    gm.add_player(PUCTPlayer(conf), "red")
+
+    str_state = """ (true (control red)) (true (cell 8 8 red)) (true (cell 8 7 red))
+    (true (cell 8 6 red)) (true (cell 8 5 red)) (true (cell 8 4 red)) (true (cell 8 3 red))
+    (true (cell 8 2 red)) (true (cell 8 1 black)) (true (cell 7 8 red)) (true (cell 7 7 red))
+    (true (cell 7 6 red)) (true (cell 7 5 red)) (true (cell 7 4 red)) (true (cell 7 3 red))
+    (true (cell 7 2 red)) (true (cell 7 1 black)) (true (cell 6 8 red)) (true (cell 6 7 red))
+    (true (cell 6 6 red)) (true (cell 6 5 red)) (true (cell 6 4 red))
+    (true (cell 6 3 black)) (true (cell 6 2 red)) (true (cell 6 1 red))
+    (true (cell 5 8 red)) (true (cell 5 7 red)) (true (cell 5 6 red)) (true (cell 5 5 red))
+    (true (cell 5 4 red)) (true (cell 5 3 black)) (true (cell 5 2 red)) (true (cell 5 1 black))
+    (true (cell 4 8 black)) (true (cell 4 7 red)) (true (cell 4 6 black)) (true (cell 4 5 red))
+    (true (cell 4 4 black)) (true (cell 4 3 black)) (true (cell 4 2 red)) (true (cell 4 1 black))
+    (true (cell 3 8 black)) (true (cell 3 7 black)) (true (cell 3 6 black)) (true (cell 3 5 black))
+    (true (cell 3 4 red)) (true (cell 3 3 black)) (true (cell 3 2 black)) (true (cell 3 1 black))
+    (true (cell 2 7 red)) (true (cell 2 6 black)) (true (cell 2 5 black)) (true (cell 2 4 black))
+    (true (cell 2 3 black)) (true (cell 2 2 black)) (true (cell 1 8 black)) (true (cell 1 7 red))
+    (true (cell 1 5 red)) """
+
+    gm.start(meta_time=30, move_time=5,
+             initial_basestate=gm.convert_to_base_state(str_state))
+    gm.play_to_end()

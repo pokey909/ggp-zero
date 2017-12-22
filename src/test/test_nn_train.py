@@ -16,6 +16,7 @@ class Rollout(object):
         self.sm = game_info.get_sm()
 
         self.states = [self.sm.new_base_state() for _ in range(MAX_STATES_FOR_ROLLOUT)]
+        self.role_count = len(self.sm.get_roles())
 
         # get and cache fast move
         self.static_joint_move = self.sm.get_joint_move()
@@ -24,14 +25,6 @@ class Rollout(object):
         self.depth = None
         self.legals = None
         self.scores = None
-
-        def get_noop_idx(actions):
-            for idx, a in enumerate(actions):
-                if "noop" in a:
-                    return idx
-            assert False, "did not find noop"
-
-        self.role0_noop_legal, self.role1_noop_legal = map(get_noop_idx, game_info.model.actions)
 
         # this is really approximate, works for some games
         assert len(self.game_info.model.roles) == 2
@@ -60,7 +53,7 @@ class Rollout(object):
     def reset(self):
         self.sm.reset()
 
-        # (lead_role_index, legal)
+        # (legals0, legals1)
         self.legals = []
         self.sm.get_current_state(self.states[0])
 
@@ -71,7 +64,7 @@ class Rollout(object):
             a_state = tuple(self.states[d].to_list())
 
             final_score = [s / 100.0 for s in self.scores]
-            lead_role_index, main_legal = self.legals[d]
+            all_main_legals = self.legals[d]
 
             if a_state not in unique_states:
                 state = a_state
@@ -82,43 +75,54 @@ class Rollout(object):
             return None
 
         self.sm.update_bases(self.states[d])
-        ls = self.sm.get_legal_state(lead_role_index)
-        total = float(ls.get_count() * 4)
-        legals = ls.to_list()
-        policy_dist = [(l, (1 / total)) for l in ls.to_list()]
-        policy_dist[legals.index(main_legal)] = (main_legal, (ls.get_count() * 3 + 1) / total)
+
+        policy_dists = []
+        for ri in range(self.role_count):
+            main_legal = all_main_legals[ri]
+            ls = self.sm.get_legal_state(ri)
+            total = float(ls.get_count() * 4)
+            legals = ls.to_list()
+            policy_dist = [(l, (1 / total)) for l in ls.to_list()]
+            policy_dist[legals.index(main_legal)] = (main_legal, (ls.get_count() * 3 + 1) / total)
+
+            policy_dists.append(policy_dist)
 
         # now we can create a sample :)
-        return msgdefs.Sample(None, state, policy_dist, final_score, d, self.depth, lead_role_index)
+        return msgdefs.Sample(None, state, policy_dists, final_score, d, self.depth)
 
     def get_current_state(self):
         return self.states[self.depth]
 
-    def choose_move(self, lead_role_index):
-        other_role_index = 0 if lead_role_index else 1
+    def choose_move(self, role_index):
+        ls = self.sm.get_legal_state(role_index)
+        if ls.get_count() == 1:
+            return ls.get_legal(0)
+
+        other_role_index = 0 if role_index else 1
 
         # set other move
         ls_other = self.sm.get_legal_state(other_role_index)
+        # XXX dont do this
         assert ls_other.get_count() == 1
+
         self.lookahead_joint_move.set(other_role_index, ls_other.get_legal(0))
 
         # steal new state for now...
         next_state = self.states[self.depth + 1]
 
-        ls = self.sm.get_legal_state(lead_role_index)
         best_moves = []
         best_count = 10000
 
         # want to reduce this
         for ii in range(ls.get_count()):
             legal = ls.get_legal(ii)
-            self.lookahead_joint_move.set(lead_role_index, legal)
+            self.lookahead_joint_move.set(role_index, legal)
             self.sm.next_state(self.lookahead_joint_move, next_state)
 
             # move forward and see if we won the game?
             self.sm.update_bases(next_state)
             if self.sm.is_terminal():
-                if self.sm.get_goal_value(lead_role_index) == 100:
+                if self.sm.get_goal_value(role_index) == 100:
                     # return this move (but fix the state of statemachine first)
                     self.sm.update_bases(self.get_current_state())
                     return legal
@@ -145,18 +149,13 @@ class Rollout(object):
                 break
 
             # play move
-            ls = self.sm.get_legal_state(0)
-            if ls.get_count() == 1 and ls.get_legal(0) == self.role0_noop_legal:
-                lead_role_index = 1
-                self.static_joint_move.set(0, self.role0_noop_legal)
-            else:
-                lead_role_index = 0
-                self.static_joint_move.set(1, self.role1_noop_legal)
+            legal_move = []
+            for ri in range(self.role_count):
+                choice = self.choose_move(ri)
+                legal_move.append(choice)
+                self.static_joint_move.set(ri, choice)
 
-            choice = self.choose_move(lead_role_index)
-
-            self.static_joint_move.set(lead_role_index, choice)
-            self.legals.append((lead_role_index, choice))
+            self.legals.append(legal_move)
 
             # borrow the next state (side affect of assigning it)
             next_state = self.states[self.depth + 1]
@@ -174,14 +173,14 @@ def nn_train_random_generated():
     ' not a unit test - like can take over a few hours ! '
     CREATE_FILE = False
     ACTUALLY_TRAIN = True
-    SAMPLE_COUNT = 50000
+    SAMPLE_COUNT = 25000
 
     train_conf = msgdefs.TrainNNRequest()
-    train_conf.game = "breakthrough"
+    train_conf.game = "reversi"
 
-    train_conf.network_size = "small"
-    train_conf.generation_prefix = "v3"
-    train_conf.store_path = os.getcwd()
+    train_conf.network_size = "tiny"
+    train_conf.generation_prefix = "v4_"
+    train_conf.store_path = os.path.join(os.environ["GGPLEARN_PATH"], "data", train_conf.game, "v4")
 
     # uses previous network
     train_conf.use_previous = False
@@ -239,22 +238,22 @@ def nn_train_random_generated():
         parse_and_train(train_conf)
 
 
-def v2_training():
+def v3_retrain():
     conf = msgdefs.TrainNNRequest()
     conf.game = "breakthrough"
 
-    conf.network_size = "smaller"
-    conf.generation_prefix = "v2_"
-    conf.store_path = os.path.join(os.environ["GGPLEARN_PATH"], "data", "breakthrough", "v2")
+    conf.network_size = "normal"
+    conf.generation_prefix = "v3x_"
+    conf.store_path = "/home/rxe/working/ggplearn/data/breakthrough/v3"
 
     # uses previous network
-    conf.use_previous = True
-    conf.next_step = 62
+    conf.use_previous = False
+    conf.next_step = 25
 
     conf.validation_split = 0.8
     conf.batch_size = 64
-    conf.epochs = 16
-    conf.max_sample_count = 100
+    conf.epochs = 32
+    conf.max_sample_count = 250000
 
     # import here so can run with pypy wihtout hitting import keras issues
     from ggplearn.training.nn_train import parse_and_train
@@ -263,4 +262,6 @@ def v2_training():
 
 if __name__ == "__main__":
     from ggplearn.util.main import main_wrap
+
+    # main_wrap(v3_retrain)
     main_wrap(nn_train_random_generated)

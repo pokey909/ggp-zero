@@ -22,7 +22,7 @@ class Child(object):
         self.legal = legal
 
         # from NN
-        self.policy_dist_pct = None
+        self.probability = None
 
         # to the next node
         # this deviates from AlphaGoZero paper, where the keep statistics on child.  But I am
@@ -49,13 +49,13 @@ class Child(object):
 
             return "%s %d %.2f%%   %.2f %s" % (self.move,
                                                self.visits(),
-                                               self.policy_dist_pct * 100,
+                                               self.probability * 100,
                                                score,
                                                "T " if n.is_terminal else "* ")
         else:
             return "%s %d %.2f%%   ---- ? " % (self.move,
                                                self.visits(),
-                                               self.policy_dist_pct * 100)
+                                               self.probability * 100)
     __str__ = __repr__
 
 
@@ -151,24 +151,17 @@ class PUCTPlayer(MatchPlayer):
         self.nodes_to_predict = []
 
     def update_node_policy(self, node, pred_policy):
-        if node.lead_role_index == 0:
-            start_pos = 0
-        else:
-            start_pos = len(self.match.game_info.model.actions[0])
-
         total = 0
         for c in node.children:
-            ridx = start_pos + c.legal
-            c.policy_dist_pct = pred_policy[ridx]
-
-            total += c.policy_dist_pct
+            c.probability = pred_policy[c.legal]
+            total += c.probability
 
         # normalise
         for c in node.children:
-            c.policy_dist_pct /= total
+            c.probability /= total
 
         # sort the children now rather than every iteration
-        node.children.sort(key=attrgetter("policy_dist_pct"), reverse=True)
+        node.children.sort(key=attrgetter("probability"), reverse=True)
 
     def do_predictions(self):
         actual_nodes_to_predict = []
@@ -188,25 +181,43 @@ class PUCTPlayer(MatchPlayer):
         states = [n.state for n in actual_nodes_to_predict]
         lead_role_indexs = [n.lead_role_index for n in actual_nodes_to_predict]
 
-        result = self.nn.predict_n(states, lead_role_indexs)
+        result = self.nn.predict_n(states)
 
-        for node, (pred_policy, pred_final_score) in zip(actual_nodes_to_predict,
-                                                         result):
+        for node, (policy_0, policy_1, pred_final_score), ri in zip(actual_nodes_to_predict,
+                                                                    result, lead_role_indexs):
             node.predicted = True
             node.final_score = pred_final_score
             node.mc_score = pred_final_score[:]
-            self.update_node_policy(node, pred_policy)
+            policy = policy_0 if ri == 0 else policy_1
+            self.update_node_policy(node, policy)
 
     def create_node(self, basestate):
         sm = self.match.sm
         sm.update_bases(basestate)
+        ls0 = sm.get_legal_state(0)
+        ls1 = sm.get_legal_state(1)
 
-        if sm.get_legal_state(0).get_count() == 1 and sm.get_legal_state(0).get_legal(0) == self.role0_noop_legal:
-            lead_role_index = 1
+        if not sm.is_terminal():
+            if ls0.get_count() == 1 and ls1.get_count() == 1:
+                if (ls0.get_legal(0) == self.role0_noop_legal and
+                    ls1.get_legal(0) == self.role1_noop_legal):
+                    # special case, use our role index
+                    lead_role_index = self.match.our_role_index
+
+                elif ls0.get_legal(0) != self.role0_noop_legal:
+                    lead_role_index = 0
+                else:
+                    lead_role_index = 1
+            else:
+                assert ls0.get_count() > 1 or ls1.get_count() > 1
+                assert ls0.get_count() == 1 or ls1.get_count() == 1
+
+                if ls0.get_count() > 1:
+                    lead_role_index = 0
+                else:
+                    lead_role_index = 1
         else:
-            assert (sm.get_legal_state(1).get_count() == 1 and
-                    sm.get_legal_state(1).get_legal(0) == self.role1_noop_legal)
-            lead_role_index = 0
+            lead_role_index = self.match.our_role_index
 
         node = Node(basestate.to_list(),
                     lead_role_index,
@@ -215,7 +226,7 @@ class PUCTPlayer(MatchPlayer):
         if node.is_terminal:
             node.terminal_scores = [sm.get_goal_value(i) for i in range(2)]
         else:
-            legal_state = sm.get_legal_state(0) if lead_role_index == 0 else sm.get_legal_state(1)
+            legal_state = ls0 if lead_role_index == 0 else ls1
             for l in legal_state.to_list():
                 node.add_child(sm.legal_to_move(lead_role_index, l), l)
 
@@ -289,15 +300,15 @@ class PUCTPlayer(MatchPlayer):
                 if cn.is_terminal:
                     node_score *= 1.02
 
-            child_pct = child.policy_dist_pct
+            prob = child.probability
 
             if dirichlet_noise is not None:
-                noise_pct = self.conf.dirichlet_noise_pct
-                child_pct = (1 - noise_pct) * child_pct + noise_pct * dirichlet_noise[idx]
+                pct = self.conf.dirichlet_noise_pct
+                prob = (1 - pct) * prob + pct * dirichlet_noise[idx]
 
             v = float(node.mc_visits + 1)
             cv = float(child_visits + 1)
-            puct_score = cpuct_constant * child_pct * (v ** 0.5) / cv
+            puct_score = cpuct_constant * prob * (v ** 0.5) / cv
 
             score = node_score + puct_score
 
@@ -506,9 +517,15 @@ class PUCTPlayer(MatchPlayer):
             return choice.legal
 
     def debug_output(self, choice):
-        for c, v in self.get_probabilities():
-            print c, v
+        for ri, role in enumerate(self.match.sm.get_roles()):
+            print "get_probabilities() for %s" % role
+            for c, v in self.get_probabilities(ri):
+                print c, v
 
+        print
+        print
+        print "DUMP TREE:"
+        print "=========="
         current = self.root
 
         dump_depth = 0
@@ -529,14 +546,18 @@ class PUCTPlayer(MatchPlayer):
 
         print "Choice", choice
 
-    def get_probabilities(self, temperature=1):
-        total_visits = float(sum(c.visits() for c in self.root.children))
+    def get_probabilities(self, ri, temperature=1):
+        if ri == self.root.lead_role_index:
+            total_visits = float(sum(c.visits() for c in self.root.children))
 
-        temps = [((c.visits() + 1) / total_visits) ** temperature for c in self.root.children]
-        temps_tot = sum(temps)
+            temps = [((c.visits() + 1) / total_visits) ** temperature for c in self.root.children]
+            temps_tot = sum(temps)
 
-        probs = [(c, t / temps_tot) for c, t in zip(self.root.children, temps)]
-        probs.sort(key=itemgetter(1), reverse=True)
+            probs = [(c.legal, t / temps_tot) for c, t in zip(self.root.children, temps)]
+            probs.sort(key=itemgetter(1), reverse=True)
+        else:
+            noop = self.role0_noop_legal if ri == 0 else self.role1_noop_legal
+            probs = [(noop, 1.0)]
 
         return probs
 
@@ -597,7 +618,7 @@ class PUCTPlayer(MatchPlayer):
 configs = dict(
     default=msgdefs.PUCTPlayerConf(name="default",
                                    verbose=True,
-                                   playouts_per_iteration=32,
+                                   playouts_per_iteration=42,
                                    playouts_per_iteration_noop=1,
                                    expand_root=100,
                                    dirichlet_noise_alpha=0.5,
@@ -608,7 +629,7 @@ configs = dict(
 
     two=msgdefs.PUCTPlayerConf(name="two-test",
                                verbose=True,
-                               playouts_per_iteration=1000,
+                               playouts_per_iteration=800,
                                playouts_per_iteration_noop=1,
                                expand_root=100,
                                dirichlet_noise_alpha=-1,
@@ -619,14 +640,25 @@ configs = dict(
 
     three=msgdefs.PUCTPlayerConf(name="three-test",
                                  verbose=True,
-                                 playouts_per_iteration=400,
+                                 playouts_per_iteration=42,
                                  playouts_per_iteration_noop=1,
                                  expand_root=100,
-                                 dirichlet_noise_alpha=0.05,
+                                 dirichlet_noise_alpha=-1,
                                  cpuct_constant_first_4=3.0,
                                  cpuct_constant_after_4=0.75,
                                  choose="choose_converge",
-                                 max_dump_depth=2))
+                                 max_dump_depth=2),
+
+    prod=msgdefs.PUCTPlayerConf(name="prod",
+                                verbose=True,
+                                playouts_per_iteration=800,
+                                playouts_per_iteration_noop=800,
+                                expand_root=100,
+                                dirichlet_noise_alpha=-1,
+                                cpuct_constant_first_4=3.0,
+                                cpuct_constant_after_4=1.0,
+                                choose="choose_converge",
+                                max_dump_depth=2))
 
 
 def main():

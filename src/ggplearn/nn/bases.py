@@ -6,7 +6,6 @@
         if self.extra_term:
             channel_count += 1
 
-    # control_base_term = None
     # extra_term = None
 
         # channel_count += 1
@@ -25,17 +24,6 @@
         #                 b_info.channel = channel_count
         #                 b_info.cord_idx = board_pos
         #                 break
-
-        # # here we add in who's turn it is, by adding a layer for each role and then setting
-        # # everything to 1.
-        # if self.control_base_term is not None:
-        #     for idx, b_info in enumerate(self.base_infos):
-        #         if b_info.terms[0] == self.control_base_term:
-        #             if state[idx]:
-        #                 channels.append(np.ones(self.channel_size))
-        #             else:
-        #                 channels.append(np.zeros(self.channel_size))
-        # else:
 
 
 class AmazonsSuicide_10x10(BasesConfig):
@@ -84,6 +72,8 @@ class BaseInfo(object):
         self.x_idx = None
         self.y_idx = None
 
+        self.control_state = False
+
 
 class BasesConfig(object):
     game = None
@@ -99,13 +89,15 @@ class BasesConfig(object):
     # defined subclass
     base_term = pieces = piece_term = x_cords = y_cords = x_term = y_term = None
 
+    control_base_term = None
+
     def __init__(self, sm_model, generation):
         self.sm_model = sm_model
         self.generation = generation
         self.create_base_infos()
 
         # for the number of outputs of the network
-        self.policy_dist_count = sum(len(l) for l in sm_model.actions)
+        self.policy_dist_counts = [len(l) for l in sm_model.actions]
         self.final_score_count = len(sm_model.roles)
 
     def create_network(self, **kwds):
@@ -131,11 +123,22 @@ class BasesConfig(object):
     @property
     def num_channels(self):
         # one for each role to indicate turn, one for each pieces
-        return self.role_count + len(self.pieces)
+        return self.role_count + self.num_of_base_controls
 
     def create_base_infos(self):
         symbol_factory = SymbolFactory()
         self.base_infos = [BaseInfo(s, symbol_factory.symbolize(s)) for s in self.sm_model.bases]
+
+        assert self.control_base_term is not None
+        self.num_of_base_controls = 0
+        self.control_states = []
+        for idx, b in enumerate(self.base_infos):
+            if b.terms[0] == self.control_base_term:
+                self.num_of_base_controls += 1
+                self.control_states.append(idx)
+                b.control_state = True
+
+        log.info("Number of control states %s" % self.num_of_base_controls)
 
         all_cords = []
         for y_cord in self.x_cords:
@@ -161,15 +164,14 @@ class BasesConfig(object):
         for i, piece in enumerate(self.pieces):
             log.info("found %s states for channel %s" % (count[i], piece))
 
-        # update the  non cord states
+        # update the non cord states
         self.number_of_non_cord_states = 0
         for b_info in self.base_infos:
             if b_info.channel is None:
                 self.number_of_non_cord_states += 1
         log.info("Number of number_of_non_cord_states %d" % self.number_of_non_cord_states)
 
-    def state_to_channels(self, state, lead_role_index, channel_last=True):
-        assert 0 <= lead_role_index <= self.role_count
+    def state_to_channels(self, state, channel_last=True):
         # create a bunch of zero channels
         channels = [np.zeros((self.num_cols, self.num_rows))
                     for _ in range(self.num_channels)]
@@ -182,8 +184,11 @@ class BasesConfig(object):
                 channels[b_info.channel][b_info.y_idx][b_info.x_idx] = 1
 
         # set who's turn it is by setting entire channel to 1
-        turn_idx = lead_role_index + len(self.pieces)
-        channels[turn_idx] += 1
+        channel_idx = len(self.pieces)
+        for idx in self.control_states:
+            if state[idx]:
+                channels[channel_idx] += 1
+            channel_idx += 1
 
         assert len(channels) == self.num_channels
 
@@ -226,6 +231,7 @@ class Breakthrough(BasesConfig):
     piece_term = 3
 
     pieces = ['white', 'black']
+    control_base_term = 'control'
 
 
 class Reversi(BasesConfig):
@@ -239,6 +245,7 @@ class Reversi(BasesConfig):
     piece_term = 3
 
     pieces = ['black', 'red']
+    control_base_term = 'control'
 
 
 class Connect4(BasesConfig):

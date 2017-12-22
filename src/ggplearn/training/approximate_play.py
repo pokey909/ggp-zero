@@ -35,21 +35,22 @@ class Runner(object):
         self.gm_policy = GameMaster(get_gdl_for_game(self.conf.game), fast_reset=True)
         self.gm_score = GameMaster(get_gdl_for_game(self.conf.game), fast_reset=True)
 
-        # add players to gamemasteres
-        for role in self.gm_select.sm.get_roles():
-            self.gm_select.add_player(PolicyPlayer(self.conf.player_select_conf), role)
-
-        for role in self.gm_policy.sm.get_roles():
-            self.gm_policy.add_player(PUCTPlayer(self.conf.player_policy_conf), role)
-
-        for role in self.gm_score.sm.get_roles():
-            self.gm_score.add_player(PolicyPlayer(self.conf.player_score_conf), role)
+        # cache roles and count
+        self.roles = self.gm_select.sm.get_roles()
+        self.role_count = len(self.roles)
 
         # cache a local statemachine basestate (doesn't matter which gm it comes from)
         self.basestate = self.gm_select.sm.new_base_state()
 
-        # and cache roles
-        self.roles = self.gm_select.sm.get_roles()
+        # add players to gamemasters
+        for role in self.roles:
+            self.gm_select.add_player(PolicyPlayer(self.conf.player_select_conf), role)
+
+        for role in self.roles:
+            self.gm_policy.add_player(PUCTPlayer(self.conf.player_policy_conf), role)
+
+        for role in self.roles:
+            self.gm_score.add_player(PolicyPlayer(self.conf.player_score_conf), role)
 
         # we want unique samples per generation, so store a unique_set here
         self.unique_states = set()
@@ -96,17 +97,12 @@ class Runner(object):
         # self.last_move used in playout_state
         self.last_move = self.gm_policy.play_single_move(None)
 
-        # fish for root (XXX for game specific)
-        lead_role_index = 1 if self.last_move[0] == "noop" else 0
+        dists = []
+        for ri in range(self.role_count):
+            player = self.gm_policy.get_player(ri)
+            dists.append(player.get_probabilities(ri, self.conf.temperature))
 
-        player = self.gm_policy.get_player(lead_role_index)
-
-        # distx = [(c.move, p) for c, p in player.get_probabilities(self.conf.temperature)]
-        # import pprint
-        # print.pprint(distx)
-
-        dist = [(c.legal, p) for c, p in player.get_probabilities(self.conf.temperature)]
-        return dist, lead_role_index
+        return dists
 
     def do_score(self, state):
         for i, v in enumerate(state):
@@ -147,7 +143,7 @@ class Runner(object):
                 continue
 
             start_time = time.time()
-            policy_dist, lead_role_index = self.do_policy(state)
+            policy_dists = self.do_policy(state)
             log.debug("Done do_policy()")
             self.acc_time_for_do_policy += time.time() - start_time
 
@@ -157,11 +153,10 @@ class Runner(object):
             log.debug("Done do_score()")
             self.acc_time_for_do_score += time.time() - start_time
 
-
             prev_state = states[depth - 1] if depth >= 1 else None
             sample = msgdefs.Sample(prev_state,
-                                    state, policy_dist, final_score,
-                                    depth, game_length, lead_role_index)
+                                    state, policy_dists, final_score,
+                                    depth, game_length)
 
             return sample, duplicate_count
 
