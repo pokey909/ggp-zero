@@ -1,6 +1,4 @@
-import os
 from operator import itemgetter
-
 import numpy as np
 
 from ggplib.player.base import MatchPlayer
@@ -10,8 +8,6 @@ from ggplearn.util.bt import pretty_print_board
 
 from ggplearn import msgdefs
 from ggplearn.nn import bases
-
-models_path = os.path.join(os.environ["GGPLEARN_PATH"], "src", "ggplearn", "models")
 
 
 class PolicyPlayer(MatchPlayer):
@@ -45,13 +41,8 @@ class PolicyPlayer(MatchPlayer):
         legals = set(ls.to_list())
 
         actions = self.match.game_info.model.actions[self.match.our_role_index]
-
-        if self.match.our_role_index == 1:
-            start_pos = len(self.match.game_info.model.actions[0])
-        else:
-            start_pos = 0
-
-        actions = [(idx, move, policy[start_pos + idx])
+        assert len(actions) == len(policy)
+        actions = [(idx, move, policy[idx])
                    for idx, move in enumerate(actions) if idx in legals]
         actions.sort(key=itemgetter(2), reverse=True)
 
@@ -123,7 +114,10 @@ class PolicyPlayer(MatchPlayer):
                 print
             print "all states"
 
-        policy, network_score = self.nn.predict_1(state, self.match.our_role_index)
+        res = self.nn.predict_1(state)
+        policy = res[self.match.our_role_index]
+        network_score = res[2]
+
         normalise_actions = self.policy_to_actions(policy)
 
         # choose()
@@ -161,7 +155,7 @@ def main():
     port = int(sys.argv[1])
     generation = sys.argv[2]
 
-    conf = msgdefs.PolicyPlayerConf(name="0.25", generation=generation, choose_exponential_scale=0.25)
+    conf = msgdefs.PolicyPlayerConf(generation=generation, choose_exponential_scale=-1)
     player = PolicyPlayer(conf)
 
     play_runner(player, port)
