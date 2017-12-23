@@ -36,20 +36,28 @@ class PolicyPlayer(MatchPlayer):
         self.game_depth = 0
 
     def policy_to_actions(self, policy):
+        all_actions = self.match.game_info.model.actions[self.match.our_role_index]
+        assert len(all_actions) == len(policy)
+
         # only do our moves
         ls = self.match.sm.get_legal_state(self.match.our_role_index)
         legals = set(ls.to_list())
 
-        actions = self.match.game_info.model.actions[self.match.our_role_index]
-        assert len(actions) == len(policy)
         actions = [(idx, move, policy[idx])
-                   for idx, move in enumerate(actions) if idx in legals]
+                   for idx, move in enumerate(all_actions) if idx in legals]
         actions.sort(key=itemgetter(2), reverse=True)
 
         total_prob = sum(p for _, _, p in actions)
         if self.conf.verbose:
             if not (0.99 < total_prob < 1.01):
-                log.debug("total probability %.2f != 1.00" % total_prob)
+                log.warning("total probability %.2f != 1.00" % total_prob)
+                other_actions = [(idx, move, policy[idx])
+                                 for idx, move in enumerate(all_actions) if idx not in legals]
+                other_actions.sort(key=itemgetter(2), reverse=True)
+
+                for l, m, p in other_actions:
+                    if p > 0.02:
+                        log.debug("WHAT? %s \t %.2f" % (m, p * 100))
 
                 # XXX log out anything (non-legal)with more 0.02 probabilty ?
 
@@ -155,7 +163,7 @@ def main():
     port = int(sys.argv[1])
     generation = sys.argv[2]
 
-    conf = msgdefs.PolicyPlayerConf(generation=generation, choose_exponential_scale=-1)
+    conf = msgdefs.PolicyPlayerConf(generation=generation, choose_exponential_scale=0.5)
     player = PolicyPlayer(conf)
 
     play_runner(player, port)
